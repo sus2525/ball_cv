@@ -1,0 +1,208 @@
+---
+- name: Provision ball_cv development host
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    # Override if needed: -e "dev_user=myuser"
+    dev_user: "{{ ansible_user | default(lookup('env', 'USER'), true) }}"
+    install_codex: true
+    codex_release: "latest"
+
+  pre_tasks:
+    - name: Validate supported platform
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version is version('22.04', '>=')
+          - ansible_architecture in ['x86_64', 'aarch64']
+        fail_msg: >-
+          Supported platforms: Ubuntu 22.04+ on x86_64/aarch64.
+          Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          {{ ansible_architecture }}.
+
+    - name: Resolve developer user account
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ dev_user }}"
+
+    - name: Resolve developer home
+      ansible.builtin.set_fact:
+        dev_home: "{{ ansible_facts.getent_passwd[dev_user][4] }}"
+        docker_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_architecture] }}"
+        is_wsl: "{{ 'microsoft' in (ansible_kernel | lower) }}"
+
+  tasks:
+    - name: Install host utilities
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - fd-find
+          - git
+          - gnupg
+          - htop
+          - jq
+          - openssh-client
+          - ripgrep
+          - tmux
+          - tree
+          - unzip
+          - wget
+          - zip
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Ensure local bin exists
+      ansible.builtin.file:
+        path: "{{ dev_home }}/.local/bin"
+        state: directory
+        owner: "{{ dev_user }}"
+        group: "{{ dev_user }}"
+        mode: "0755"
+
+    - name: Ensure local bin is in PATH
+      ansible.builtin.lineinfile:
+        path: "{{ dev_home }}/.bashrc"
+        line: 'export PATH="$HOME/.local/bin:$PATH"'
+        create: true
+        state: present
+        owner: "{{ dev_user }}"
+        group: "{{ dev_user }}"
+        mode: "0644"
+
+    - name: Provide fd command on Ubuntu
+      ansible.builtin.file:
+        src: /usr/bin/fdfind
+        dest: "{{ dev_home }}/.local/bin/fd"
+        state: link
+        owner: "{{ dev_user }}"
+        group: "{{ dev_user }}"
+
+    - name: Configure Git default branch
+      become_user: "{{ dev_user }}"
+      ansible.builtin.command:
+        argv:
+          - git
+          - config
+          - --global
+          - init.defaultBranch
+          - main
+      changed_when: false
+      environment:
+        HOME: "{{ dev_home }}"
+
+    - name: Ensure Docker apt keyring directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Install Docker repository signing key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+        force: true
+
+    - name: Configure Docker apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/docker.sources
+        mode: "0644"
+        content: |
+          Types: deb
+          URIs: https://download.docker.com/linux/ubuntu
+          Suites: {{ ansible_distribution_release }}
+          Components: stable
+          Architectures: {{ docker_arch }}
+          Signed-By: /etc/apt/keyrings/docker.asc
+      register: docker_repository
+
+    - name: Refresh apt cache after Docker repository change
+      ansible.builtin.apt:
+        update_cache: true
+      when: docker_repository.changed
+
+    - name: Install Docker Engine and Compose plugin
+      ansible.builtin.apt:
+        name:
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-ce
+          - docker-ce-cli
+          - docker-compose-plugin
+        state: present
+
+    - name: Add developer user to docker group
+      ansible.builtin.user:
+        name: "{{ dev_user }}"
+        groups: docker
+        append: true
+
+    - name: Detect active systemd
+      ansible.builtin.stat:
+        path: /run/systemd/system
+      register: systemd_runtime
+
+    - name: Start and enable Docker when systemd is active
+      ansible.builtin.systemd_service:
+        name: docker
+        state: started
+        enabled: true
+      when: systemd_runtime.stat.exists
+
+    - name: Explain WSL requirement when systemd is unavailable
+      ansible.builtin.debug:
+        msg: >-
+          WSL detected without active systemd. Enable systemd in /etc/wsl.conf,
+          run 'wsl --shutdown' from Windows, reopen Ubuntu, then rerun this playbook.
+      when:
+        - is_wsl | bool
+        - not systemd_runtime.stat.exists
+
+    - name: Install Codex CLI standalone
+      become_user: "{{ dev_user }}"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        curl -fsSL https://chatgpt.com/codex/install.sh | sh
+      args:
+        executable: /bin/bash
+        creates: "{{ dev_home }}/.local/bin/codex"
+      environment:
+        HOME: "{{ dev_home }}"
+        CODEX_RELEASE: "{{ codex_release }}"
+        CODEX_NON_INTERACTIVE: "true"
+      when: install_codex | bool
+
+    - name: Verify host tools
+      ansible.builtin.shell: |
+        set -euo pipefail
+        git --version
+        curl --version | head -n 1
+        docker --version
+        docker compose version
+        jq --version
+        rg --version | head -n 1
+        "{{ dev_home }}/.local/bin/fd" --version
+        {% if install_codex | bool %}
+        "{{ dev_home }}/.local/bin/codex" --version
+        {% endif %}
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Check Docker daemon
+      ansible.builtin.command: docker info
+      changed_when: false
+      when: systemd_runtime.stat.exists
+
+  post_tasks:
+    - name: Host provisioning summary
+      ansible.builtin.debug:
+        msg:
+          - "Host is ready for ball_cv development."
+          - "Developer user: {{ dev_user }}"
+          - "Docker group membership becomes active after a new login/session."
+          - "Next: clone ball_cv and run 'docker compose up -d --build'."

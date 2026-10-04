@@ -1,0 +1,29 @@
+services:
+  ball-cv:
+    build:
+      context: .
+      target: dev
+      args:
+        PYTHON_VERSION: "3.12"
+        UV_VERSION: "0.12.22"
+    working_dir: /workspace
+    init: true
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      BALL_CV_DATA_DIR: /data
+      BALL_CV_MODELS_DIR: /models
+      BALL_CV_ARTIFACTS_DIR: /artifacts
+    volumes:
+      - .:/workspace
+      - ./data:/data
+      - ./models:/models
+      - ./artifacts:/artifacts
+      - uv-cache:/root/.cache/uv
+    command: ["/bin/bash", "/workspace/scripts/dev-start.sh"]
+    stdin_open: true
+    tty: true
+
+volumes:
+  uv-cache:
