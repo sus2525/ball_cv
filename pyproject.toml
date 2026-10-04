@@ -14,6 +14,7 @@ dependencies = [
   "opencv-python-headless>=4.10,<5",
   "python-dotenv>=1.1,<2",
   "requests>=2.32,<3",
+  "torch>=2,<3",
   "ultralytics-opencv-headless>=8.4,<9",
 ]
 
@@ -39,3 +40,12 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

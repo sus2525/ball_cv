@@ -22,6 +22,12 @@ services:
       - ./artifacts:/artifacts
       - uv-cache:/root/.cache/uv
     command: ["/bin/bash", "/workspace/scripts/dev-start.sh"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ball-cv-ready"]
+      interval: 3s
+      timeout: 2s
+      retries: 100
+      start_period: 5s
     stdin_open: true
     tty: true
 

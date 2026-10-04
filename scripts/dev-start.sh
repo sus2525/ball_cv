@@ -12,4 +12,5 @@ else
 fi
 
 python -m ball_cv doctor
+touch /tmp/ball-cv-ready
 exec sleep infinity

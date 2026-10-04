@@ -9,7 +9,10 @@ video -> frames -> field calibration -> ball detection -> tracking
       -> field coordinates -> evaluation -> retraining
 ```
 
-This repository currently provides the **development/runtime foundation** for that pipeline. The CV pipeline itself is not implemented yet.
+The repository includes a first video-to-trajectory baseline: it runs a supplied
+YOLO model on each frame, associates one ball between frames, and writes frame-indexed
+JSONL plus a video overlay. Calibration, measured evaluation, training, and storage
+workflows remain future stages.
 
 ## Architecture
 
@@ -28,7 +31,7 @@ Docker container: ball-cv
 ├── uv
 ├── FFmpeg
 ├── OpenCV
-├── PyTorch
+├── CPU-only PyTorch
 ├── Ultralytics
 └── project Python dependencies
 ```
@@ -39,8 +42,9 @@ Rules:
 - Docker owns the `ball_cv` application runtime.
 - Python dependencies are declared in `pyproject.toml` and locked in `uv.lock`.
 - Do not install application Python packages globally on the host.
-- `data/`, `models/`, and `artifacts/` are runtime directories and are not committed to Git.
+- `data/`, `models/`, and `artifacts/` are runtime directories; only `.gitkeep` files are committed.
 - The current environment is **CPU-first**. GPU/CUDA support should be added only when a concrete GPU target is selected.
+- Users provide their own video, annotations/frames, and compatible YOLO model weights.
 
 ## Repository layout
 
@@ -71,9 +75,10 @@ If Docker and the host utilities are already installed, the shortest path is:
 
 ```bash
 cp .env.example .env
-docker compose up -d --build
+make up
 make doctor
 make test
+make lint
 ```
 
 Then enter the development container:
@@ -81,6 +86,17 @@ Then enter the development container:
 ```bash
 make shell
 ```
+
+For the first video run, put model weights at `models/ball.pt` and a video at
+`data/videos/match.mp4`, then run:
+
+```bash
+make track VIDEO=/data/videos/match.mp4 ARGS="--class-id 0"
+```
+
+The class ID depends on the model. Check its labels before selecting one. Results
+are written to `artifacts/match/tracking.jsonl` and `artifacts/match/overlay.mp4`.
+See [First tracking run](#first-tracking-run) for options and output format.
 
 For a new machine, follow the full setup below.
 
@@ -308,7 +324,7 @@ AWS_SECRET_ACCESS_KEY=
 Run:
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build --wait --wait-timeout 300
 ```
 
 or:
@@ -323,11 +339,14 @@ What happens:
 2. The repository is mounted to `/workspace`.
 3. `uv` synchronizes Python dependencies.
 4. If `uv.lock` is missing, the first startup resolves dependencies and writes
-   the lock into the repository. Review and commit that file; subsequent
-   builds synchronize against the committed lock.
+   the lock into the repository. Commit it so later builds use the same graph.
+   PyTorch and torchvision are resolved from the CPU wheel index.
 5. `ball_cv doctor` checks the Python/CV imports, FFmpeg, and writable runtime
    directories. It exits with an error if a required check fails.
 6. The container stays running for development.
+
+The Compose healthcheck marks the service ready only after dependency sync and
+the startup doctor finish; `make up` waits for that state.
 
 Check status:
 
@@ -446,10 +465,65 @@ make logs     follow container logs
 make down     stop environment
 ```
 
-The current application CLI only implements `ball-cv doctor`. Video extraction,
-detection/inference, tracking, calibration, evaluation, training, and S3 workflows
-are not implemented yet; roadmap items in `ball.md` should not be treated as
-available commands.
+The current CLI implements `ball-cv doctor` and `ball-cv track-video`. The
+tracking command is an initial single-object baseline; it has not been evaluated
+against your video or annotations. Calibration, evaluation metrics, training,
+and S3 workflows are not implemented yet.
+
+# First tracking run
+
+The project does not include sample videos, frames, annotations, or model weights.
+Keep your files under the ignored runtime directories:
+
+```text
+data/videos/match.mp4
+models/ball.pt
+artifacts/                 # generated outputs
+```
+
+Start Docker and check the environment, then run a video:
+
+```bash
+make up
+make doctor
+make track VIDEO=/data/videos/match.mp4 ARGS="--class-id 0"
+```
+
+Or run the CLI directly:
+
+```bash
+docker compose exec ball-cv python -m ball_cv track-video \
+  /data/videos/match.mp4 \
+  --model /models/ball.pt \
+  --output-dir /artifacts/match \
+  --class-id 0 \
+  --confidence 0.25 \
+  --max-distance 120 \
+  --max-gap 5
+```
+
+Options:
+
+- `--model`: YOLO weights path; defaults to `/models/ball.pt`. The project does
+  not download weights automatically.
+- `--class-id`: optional class filter. Set it for a multi-class model so the
+  tracker does not follow a player or another detected object.
+- `--confidence`: detector confidence threshold from 0 to 1 (default `0.25`).
+- `--max-distance`: maximum predicted-center association distance in pixels
+  (default `120`); tune it for video resolution and ball speed.
+- `--max-gap`: number of missed frames to tolerate before starting a new track
+  (default `5`).
+- `--device`: inference device (default `cpu`).
+
+Each JSONL row corresponds to one decoded video frame. A visible row includes
+`frame`, `timestamp_seconds`, `bbox` (`x1,y1,x2,y2`), `pixel` (center),
+`confidence`, `class_id`, `label`, and `track_id`. When the ball is not detected,
+`visible` is false and the detection fields are null. The tracker is intentionally
+simple and may lose or switch the ball during long occlusions or abrupt motion.
+
+This command decodes frames internally and does not save a separate frame set.
+You own video selection, frame extraction/curation, annotations, and model weights.
+The application writes outputs only under `artifacts/` by default.
 
 # 8. Python dependencies
 
@@ -491,7 +565,7 @@ make build
 or:
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build --wait --wait-timeout 300
 ```
 
 ## Why both Docker and uv?
@@ -563,13 +637,14 @@ docker compose exec ball-cv pytest
 docker compose exec ball-cv ruff check .
 ```
 
-The `ball-cv` CLI currently exposes the environment doctor:
+The `ball-cv` CLI exposes the environment doctor and video tracking:
 
 ```bash
 docker compose exec ball-cv ball-cv doctor
+docker compose exec ball-cv ball-cv track-video --help
 ```
 
-More commands will be added as the video/detection/tracking pipeline is implemented.
+The `track-video` command is documented in [First tracking run](#first-tracking-run).
 
 # 11. Runtime image
 
@@ -583,13 +658,19 @@ To build the smaller runtime target:
 docker build --target runtime -t ball-cv:runtime .
 ```
 
-Run it:
+The runtime image checks the configured mount directories, so provide them even
+for the doctor smoke check:
 
 ```bash
-docker run --rm ball-cv:runtime
+docker run --rm \
+  --mount type=bind,src="$PWD/data",dst=/data \
+  --mount type=bind,src="$PWD/models",dst=/models \
+  --mount type=bind,src="$PWD/artifacts",dst=/artifacts \
+  ball-cv:runtime
 ```
 
-At the current stage its default command runs the environment doctor. Application runtime commands will replace this as the MVP pipeline is implemented.
+Its default command runs the environment doctor. The development Compose service
+is the recommended way to run `track-video`.
 
 # 12. Using Codex / coding agents
 
@@ -602,14 +683,46 @@ cd ~/projects/ball_cv
 codex
 ```
 
-When giving a task, describe the desired change and acceptance criteria rather than repeating the whole repository architecture; the persistent rules are already in `AGENTS.md`.
+Give each coding agent one bounded task, list the files it owns, and state the
+acceptance criteria and checks. The lead agent owns shared interfaces and
+integration. Do not ask parallel agents to edit the same files. Use separate
+branches/worktrees for larger independent tasks, then review and merge them.
+
+Useful roles as the project grows:
+
+- infrastructure agent: Docker, Compose, dependency lock, and reproducible setup;
+- pipeline agent: video decoding and prediction output schema;
+- model research agent: compare candidate detector weights and check their
+  licensing using public documentation; it must not inspect private user media;
+- tracking/evaluation agent: association logic, metrics, and synthetic tests;
+- reviewer: inspect the final diff, test results, and scope.
+
+Use only roles needed for the current task. No project-specific CV skill is
+currently installed; agents use `AGENTS.md` and `ball.md` as their working
+context. Skills are not a substitute for explicit task scope or test criteria.
+
+Task template:
+
+```text
+Goal:
+Scope/files:
+Constraints (especially user data and model weights):
+Acceptance criteria:
+Checks to run:
+Report changed files, checks, and remaining limitations.
+```
+
+For the next CV milestone, detector/license research can run independently of
+the core tracking code. Once you provide annotated frames, assign evaluation
+metrics against those labels; do not ask agents to claim detector quality from
+public benchmarks or synthetic tests alone.
 
 Example task:
 
 ```text
-Implement video frame extraction from /data/videos/input.mp4.
-Store frames under /artifacts/frames.
-Add tests for path handling and run lint/tests.
+Add a deterministic evaluation command for user-provided predictions and labels.
+Do not create or inspect user data. Define the input schema first, add synthetic
+tests, and run make lint, make test, and make doctor in the container.
 ```
 
 # 13. Troubleshooting
@@ -731,17 +844,15 @@ Current repository scope:
 - reproducible CPU-first Python/CV environment;
 - Docker-based development workflow;
 - basic environment diagnostics and smoke tests;
-- placeholders for video/data/model/artifact storage.
+- single-video YOLO inference with a basic one-ball tracker;
+- JSONL frame predictions and MP4 overlay output;
+- placeholders for user-managed video/data/model/artifact storage.
 
 Not implemented yet:
-
-- video ingestion pipeline;
-- frame extraction pipeline;
 - football field calibration;
-- ball detector workflow;
-- tracking;
 - conversion to field coordinates;
-- evaluation/retraining pipeline;
+- metric-based evaluation and retraining pipeline;
+- automatic detector/model selection;
 - GPU/CUDA image/profile;
 - production deployment/orchestration.
 

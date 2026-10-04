@@ -46,19 +46,47 @@ video
 
 ## Stage 1 — Infrastructure
 
-Подготовить минимальное воспроизводимое окружение для разработки и экспериментов.
+Подготовить минимальное воспроизводимое окружение для разработки и первого
+покадрового baseline.
 
 ### Реализовано сейчас
 
 - Docker Compose dev-контейнер: Python 3.12, `uv`, FFmpeg и headless CV/ML зависимости.
-- Make-команды: `up`, `down`, `build`, `logs`, `shell`, `doctor`, `test`, `lint`, `lock`.
-- CLI реализует только `ball-cv doctor`.
+- PyTorch/torchvision устанавливаются из CPU-only индекса; GPU/CUDA не настраивается.
+- CLI: `ball-cv doctor` и `ball-cv track-video`.
+- `track-video` декодирует пользовательское видео, выполняет YOLO детекцию на каждом
+  кадре, связывает один объект простым предсказанием движения и пишет JSONL плюс MP4
+  с наложением.
+- Make-команды: `up`, `down`, `build`, `logs`, `shell`, `doctor`, `track`, `test`,
+  `lint`, `lock`.
 - S3-переменные описаны, но загрузка/выгрузка в object storage не реализована.
-- `uv.lock` должен быть сгенерирован первым запуском контейнера и добавлен в Git;
-  без него первый dependency resolve ещё не воспроизводим.
+- `uv.lock` должен быть сгенерирован первым запуском контейнера и добавлен в Git.
+- Первый трекер — стартовая эвристика, качество детектора и точность траектории
+  на реальном видео ещё не измерены.
 
-Текущие `make extract`, `make infer`, `make evaluate`, `make train` и `make setup`
-не реализованы. Это целевые команды будущих этапов, а не доступный интерфейс.
+`make extract`, `make infer`, `make evaluate`, `make train` и `make setup` пока не
+реализованы. Кадры пользователь подготавливает и размечает самостоятельно; `track-video`
+декодирует кадры на лету и не сохраняет их отдельным набором.
+
+Первый запуск после клонирования:
+
+```bash
+cp .env.example .env   # необязательно, если устраивают значения по умолчанию
+make up                # первый build и запуск могут занять время
+make doctor
+make test
+make lint
+```
+
+Положить собственные веса в `models/ball.pt`, видео в `data/videos/`, затем:
+
+```bash
+make track VIDEO=/data/videos/match.mp4 ARGS="--class-id 0"
+```
+
+Результаты появятся в `artifacts/match/`: `tracking.jsonl` и `overlay.mp4`.
+Уточнить `--class-id` по меткам конкретной модели. Если модель одноклассовая,
+ID часто равен `0`, но это нужно проверить по выбранным весам.
 
 Нужно:
 
@@ -88,7 +116,7 @@ optional GPU runner
 - Docker только там, где требуется изоляция ML dependencies.
 - CLI / Makefile как единый интерфейс запуска pipeline.
 
-Основные команды:
+Целевые команды следующих этапов:
 
 ```bash
 make setup
@@ -167,7 +195,10 @@ frame/video
 ball position
 ```
 
-Сначала проверить готовые pretrained models.
+Сначала проверить готовые pretrained models. Текущая команда `track-video` уже
+умеет загружать предоставленные YOLO weights, но репозиторий не выбирает и не
+скачивает веса автоматически. Для первого запуска пользователь предоставляет
+видео и совместимую модель.
 
 Первый feasibility dataset:
 
@@ -183,7 +214,10 @@ ball position
 - occlusion;
 - кадры без мяча.
 
-Разметка:
+Разметка выполняется пользователем отдельно; проект не создаёт и не редактирует
+исходные видео, кадры или annotations. Для измерения качества нужны annotations.
+
+Формат разметки:
 
 ```text
 class: ball
@@ -286,7 +320,9 @@ VPS 1 CPU / 2 GB не использовать для training.
 
 ## Stage 5 — Tracking
 
-После стабильной детекции добавить простой temporal tracking.
+Текущая команда уже включает минимальный temporal association для получения
+первой визуальной траектории. После проверки на пользовательском видео сравнить
+результат с annotations и улучшать детектор/ассоциацию только по измерениям.
 
 Так как интересует один объект:
 
@@ -294,16 +330,19 @@ VPS 1 CPU / 2 GB не использовать для training.
 0 or 1 ball
 ```
 
-первый вариант:
+текущий baseline:
 
 ```text
 detector
 → confidence filtering
 → temporal gating
-→ simple Kalman/motion model
+→ constant-velocity prediction + nearest-center association
 ```
 
-Не использовать ReID / DeepSORT без необходимости.
+Параметры `--max-distance` (пиксели) и `--max-gap` (число пропущенных кадров)
+зависят от разрешения и движения в кадре; настроить их после первого прогона.
+Этот алгоритм не решает сложные окклюзии или неоднозначные переключения между
+кандидатами. Не использовать ReID / DeepSORT без необходимости.
 
 ---
 
@@ -431,7 +470,16 @@ make evaluate
 
 # MVP Success Criterion
 
-MVP считается рабочим, когда система может:
+Первый вертикальный срез готов, когда система может:
+
+```text
+take user-provided video and model weights
+→ detect a candidate ball per frame
+→ maintain a basic single-object trajectory
+→ save frame-indexed JSONL and an annotated video
+```
+
+Полный MVP считается рабочим, когда дополнительно выполнены:
 
 ```text
 take real football video

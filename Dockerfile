@@ -3,9 +3,9 @@
 ARG PYTHON_VERSION=3.12
 ARG UV_VERSION=0.12.22
 
-FROM python:${PYTHON_VERSION}-slim-bookworm AS base
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
-ARG UV_VERSION
+FROM python:${PYTHON_VERSION}-slim-bookworm AS base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -21,7 +21,7 @@ RUN apt-get update \
         git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /uvx /bin/
+COPY --from=uv /uv /uvx /bin/
 
 WORKDIR /workspace
 
@@ -52,6 +52,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
          uv sync --no-install-project --no-dev; \
        fi
 COPY src ./src
+COPY README.md ./README.md
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ -f uv.lock ]; then uv sync --locked --no-dev; else uv sync --no-dev; fi
 CMD ["python", "-m", "ball_cv", "doctor"]
